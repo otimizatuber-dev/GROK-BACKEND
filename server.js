@@ -5,84 +5,124 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
-app.use(cors({ origin: "*" }));
-app.use(express.json());
+// ================= CORS =================
+const corsOptions = {
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "apikey", "x-client-info"],
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+app.use(express.json({ limit: "20mb" }));
 
 // ================= CONFIG =================
 const DAILY_CREDITS = 2000;
+const COST_PER_REQUEST = 40;
 
-const COST = {
-  text: 0,     // 🔥 grátis
-  image: 0,    // 🔥 grátis
-  video: 40,   // 💰 pago
-};
+// ================= ENV =================
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  API_KEY,
+  PORT = 8080,
+} = process.env;
 
-const MAX_TOKENS = 800;
+console.log("SUPABASE_URL:", SUPABASE_URL ? "OK" : "MISSING");
+console.log(
+  "SUPABASE_SERVICE_ROLE_KEY:",
+  SUPABASE_SERVICE_ROLE_KEY ? "OK" : "MISSING"
+);
+console.log("API_KEY:", API_KEY ? "OK" : "MISSING");
 
-// ================= SUPABASE =================
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !API_KEY) {
+  console.error("❌ ERRO: variáveis obrigatórias não configuradas.");
+  process.exit(1);
+}
+
+// ================= CLIENT ADMIN =================
+const supabaseAdmin = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  }
 );
 
 // ================= AUTH =================
-async function verifyToken(token) {
-  if (!token) return null;
+async function verifySupabaseToken(rawToken) {
+  const token = rawToken?.replace(/^Bearer\s+/i, "").trim();
 
-  const { data, error } = await supabase.auth.getUser(token);
+  if (!token) {
+    return { user: null, error: "missing_token" };
+  }
 
-  if (error || !data?.user) return null;
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
 
-  return data.user;
+  if (error || !data?.user) {
+    console.error("Supabase auth error:", error?.message || "user_not_found");
+    return { user: null, error: error?.message || "invalid_token" };
+  }
+
+  return { user: data.user, error: null };
 }
 
-// ================= MEMORY =================
+// ================= MEMÓRIA =================
 const users = {};
-const lastRequest = {};
-const ipCount = {};
+const userLastRequest = {};
+const ipRequests = {};
 
 // ================= UTIL =================
 function getIP(req) {
-  return req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+  const forwarded = req.headers["x-forwarded-for"];
+
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  return req.socket.remoteAddress || "unknown";
 }
 
-// ================= RATE LIMIT IP =================
+// ================= ANTI-SPAM IP =================
 function limitIP(ip) {
   const now = Date.now();
 
-  if (!ipCount[ip]) {
-    ipCount[ip] = { count: 1, last: now };
+  if (!ipRequests[ip]) {
+    ipRequests[ip] = { count: 1, last: now };
     return true;
   }
 
-  if (now - ipCount[ip].last > 60000) {
-    ipCount[ip] = { count: 1, last: now };
+  if (now - ipRequests[ip].last > 60000) {
+    ipRequests[ip] = { count: 1, last: now };
     return true;
   }
 
-  if (ipCount[ip].count > 30) return false;
+  if (ipRequests[ip].count >= 30) return false;
 
-  ipCount[ip].count++;
+  ipRequests[ip].count++;
   return true;
 }
 
 // ================= RATE LIMIT USER =================
-function limitUser(userId) {
+function canRequest(userId) {
   const now = Date.now();
 
-  if (!lastRequest[userId]) {
-    lastRequest[userId] = now;
+  if (!userLastRequest[userId]) {
+    userLastRequest[userId] = now;
     return true;
   }
 
-  if (now - lastRequest[userId] < 3000) return false;
+  if (now - userLastRequest[userId] < 3000) return false;
 
-  lastRequest[userId] = now;
+  userLastRequest[userId] = now;
   return true;
 }
 
-// ================= RESET CREDITS =================
-function reset(user) {
+// ================= RESET CRÉDITOS =================
+function resetCredits(user) {
   const now = Date.now();
 
   if (!user.lastReset || now - user.lastReset > 86400000) {
@@ -91,25 +131,28 @@ function reset(user) {
   }
 }
 
-// ================= HEALTH =================
+// ================= HEALTH CHECK =================
 app.get("/", (req, res) => {
-  res.json({ ok: true });
+  res.json({ status: "ok", message: "Backend rodando 🚀" });
 });
 
 // ================= MAIN =================
 app.post("/generate", async (req, res) => {
-  const { token, prompt, type } = req.body;
-
+  const { token, prompt, duration, type } = req.body;
   const ip = getIP(req);
 
   if (!limitIP(ip)) {
-    return res.status(429).send("Muitas requisições");
+    return res.status(429).json({ error: "Muitas requisições" });
   }
 
-  const userData = await verifyToken(token);
+  const authToken = token || req.headers.authorization;
+  const { user: userData, error: authError } = await verifySupabaseToken(authToken);
 
   if (!userData) {
-    return res.status(403).send("Token inválido");
+    return res.status(403).json({
+      error: "Token inválido",
+      details: authError,
+    });
   }
 
   const userId = userData.email || userData.id;
@@ -123,98 +166,160 @@ app.post("/generate", async (req, res) => {
 
   const user = users[userId];
 
-  reset(user);
+  resetCredits(user);
 
-  if (!limitUser(userId)) {
-    return res.status(429).send("Aguarde 3 segundos");
+  if (!canRequest(userId)) {
+    return res.status(429).json({ error: "Aguarde 3 segundos" });
   }
 
-  const cost = COST[type] ?? 0;
-
-  if (user.credits < cost) {
-    return res.status(403).send("Sem créditos");
+  if (user.credits < COST_PER_REQUEST) {
+    return res.status(403).json({ error: "Sem créditos" });
   }
 
-  if (!prompt) {
-    return res.status(400).send("Prompt inválido");
+  if (!prompt || typeof prompt !== "string" || !prompt.trim() || prompt.length > 2000) {
+    return res.status(400).json({ error: "Prompt inválido" });
   }
 
   try {
-    let result;
-
-    // ================= TEXT (GRÁTIS) =================
-    if (!type || type === "text") {
-      const r = await axios.post(
-        "https://api.x.ai/v1/chat/completions",
+    if (type === "video") {
+      const createResponse = await axios.post(
+        "https://api.x.ai/v1/videos/generations",
         {
-          model: "grok-3",
-          max_tokens: MAX_TOKENS,
-          messages: [{ role: "user", content: prompt }],
+          model: "grok-imagine-video",
+          prompt: prompt.trim(),
+          duration: duration || 6,
         },
         {
           headers: {
-            Authorization: `Bearer ${process.env.API_KEY}`,
+            Authorization: `Bearer ${API_KEY}`,
             "Content-Type": "application/json",
           },
         }
       );
 
-      result = { text: r.data.choices[0].message.content };
+      const requestId = createResponse.data?.request_id;
+
+      if (!requestId) {
+        return res.status(500).json({
+          error: "Não foi possível iniciar a geração do vídeo",
+        });
+      }
+
+      let videoUrl = null;
+
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 5000));
+
+        const pollResponse = await axios.get(
+          `https://api.x.ai/v1/videos/${requestId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${API_KEY}`,
+            },
+          }
+        );
+
+        const status = pollResponse.data?.state || pollResponse.data?.status;
+
+        if (status === "done" || status === "completed") {
+          videoUrl =
+            pollResponse.data?.video?.url ||
+            pollResponse.data?.data?.[0]?.url ||
+            pollResponse.data?.url;
+          break;
+        }
+
+        if (status === "failed" || status === "error") {
+          return res.status(500).json({ error: "Falha na geração do vídeo" });
+        }
+      }
+
+      if (!videoUrl) {
+        return res.status(504).json({ error: "Tempo esgotado na geração do vídeo" });
+      }
+
+      user.credits -= COST_PER_REQUEST;
+
+      return res.json({
+        url: videoUrl,
+        creditsLeft: user.credits,
+        duration: duration || 6,
+        type: "video",
+      });
     }
 
-    // ================= IMAGE (GRÁTIS) =================
-    if (type === "image") {
-      const r = await axios.post(
+    if (type === "image-pro") {
+      const response = await axios.post(
         "https://api.x.ai/v1/images/generations",
         {
-          model: "grok-2-image",
-          prompt,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.API_KEY}`,
-          },
-        }
-      );
-
-      result = { url: r.data?.data?.[0]?.url };
-    }
-
-    // ================= VIDEO (40 CREDITS) =================
-    if (type === "video") {
-      const r = await axios.post(
-        "https://api.x.ai/v1/videos/generations",
-        {
-          model: "grok-imagine-video",
-          prompt,
+          model: "grok-imagine-image-pro",
+          prompt: prompt.trim(),
           response_format: "url",
+          n: 1,
         },
         {
           headers: {
-            Authorization: `Bearer ${process.env.API_KEY}`,
+            Authorization: `Bearer ${API_KEY}`,
+            "Content-Type": "application/json",
           },
         }
       );
 
-      result = { url: r.data?.data?.[0]?.url };
+      const url = response.data?.data?.[0]?.url;
+
+      if (!url) {
+        return res.status(500).json({ error: "Não foi possível gerar a imagem pro" });
+      }
+
+      user.credits -= COST_PER_REQUEST;
+
+      return res.json({
+        url,
+        creditsLeft: user.credits,
+        type: "image-pro",
+      });
     }
 
-    user.credits -= cost;
+    const response = await axios.post(
+      "https://api.x.ai/v1/images/generations",
+      {
+        model: "grok-imagine-image",
+        prompt: prompt.trim(),
+        response_format: "url",
+        n: 1,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const url = response.data?.data?.[0]?.url;
+
+    if (!url) {
+      return res.status(500).json({ error: "Não foi possível gerar a imagem" });
+    }
+
+    user.credits -= COST_PER_REQUEST;
 
     return res.json({
-      ...result,
-      type,
+      url,
       creditsLeft: user.credits,
+      type: "image",
     });
   } catch (err) {
-    console.error(err?.response?.data || err.message);
-    return res.status(500).send("Erro na geração");
+    console.error("Grok error:", err?.response?.data || err.message);
+
+    return res.status(err?.response?.status || 500).json({
+      error: "Erro na geração",
+      details: err?.response?.data || err.message,
+    });
   }
 });
 
 // ================= START =================
-const PORT = process.env.PORT || 8080;
-
 app.listen(PORT, () => {
   console.log("🚀 rodando na porta " + PORT);
 });
