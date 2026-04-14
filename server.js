@@ -1,7 +1,7 @@
 const express = require("express")
 const axios = require("axios")
 const cors = require("cors")
-const jwt = require("jsonwebtoken")
+const { createClient } = require("@supabase/supabase-js")
 
 const app = express()
 
@@ -19,13 +19,22 @@ const DAILY_CREDITS = 2000
 const COST_PER_REQUEST = 40
 const MAX_TOKENS = 800
 
-// ================= SUPABASE JWT =================
-function verifySupabaseToken(token) {
-  try {
-    return jwt.verify(token, process.env.SUPABASE_JWT_SECRET)
-  } catch {
+// ================= SUPABASE CLIENT (RECOMENDADO) =================
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+)
+
+// 🔐 valida token corretamente (NÃO usa JWT manual)
+async function verifySupabaseToken(token) {
+  const { data, error } = await supabase.auth.getUser(token)
+
+  if (error || !data?.user) {
+    console.log("Supabase auth error:", error?.message)
     return null
   }
+
+  return data.user
 }
 
 // ================= MEMÓRIA (SEM BANCO) =================
@@ -58,7 +67,7 @@ function limitIP(ip) {
   return true
 }
 
-// ================= RATE LIMIT USER =================
+// ================= RATE LIMIT =================
 function canRequest(userId) {
   const now = Date.now()
 
@@ -88,7 +97,7 @@ app.get("/", (req, res) => {
   res.send("Backend rodando 🚀")
 })
 
-// ================= MAIN API =================
+// ================= MAIN ROUTE =================
 app.post("/generate", async (req, res) => {
   const { token, prompt } = req.body
   const ip = getIP(req)
@@ -98,15 +107,14 @@ app.post("/generate", async (req, res) => {
     return res.status(429).send("Muitas requisições")
   }
 
-  // 🔐 SUPABASE TOKEN
-  const data = verifySupabaseToken(token)
-  if (!data) return res.status(403).send("Token inválido")
+  // 🔐 SUPABASE AUTH (CORRETO)
+  const userData = await verifySupabaseToken(token)
 
-  const email = data.email || data.sub
-
-  if (!email) {
-    return res.status(403).send("Usuário inválido")
+  if (!userData) {
+    return res.status(403).send("Token inválido")
   }
+
+  const email = userData.email || userData.id
 
   // 👤 cria usuário em memória
   if (!users[email]) {
@@ -120,7 +128,7 @@ app.post("/generate", async (req, res) => {
 
   resetCredits(user)
 
-  // ⏳ rate limit
+  // ⏳ rate limit usuário
   if (!canRequest(email)) {
     return res.status(429).send("Aguarde 3 segundos")
   }
@@ -160,7 +168,7 @@ app.post("/generate", async (req, res) => {
     })
 
   } catch (err) {
-    console.error(err)
+    console.error("Grok error:", err?.response?.data || err.message)
     res.status(500).send("Erro na geração")
   }
 })
