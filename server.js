@@ -1,46 +1,45 @@
 const express = require("express")
 const axios = require("axios")
 const cors = require("cors")
+const jwt = require("jsonwebtoken")
 
 const app = express()
 
-// 🔓 CORS (ajuste seu domínio depois)
+// 🔥 CORS
 app.use(cors({
-  origin: "*"
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }))
 
-// 📦 JSON body
 app.use(express.json())
 
-// =============================
-// 🔥 CONFIGURAÇÕES
-// =============================
+// ================= CONFIG =================
 const DAILY_CREDITS = 2000
 const COST_PER_REQUEST = 40
 const MAX_TOKENS = 800
 
-// =============================
-// 🧠 MEMÓRIA SIMPLES (RAM)
-// =============================
+// ================= SUPABASE JWT =================
+function verifySupabaseToken(token) {
+  try {
+    return jwt.verify(token, process.env.SUPABASE_JWT_SECRET)
+  } catch {
+    return null
+  }
+}
+
+// ================= MEMÓRIA (SEM BANCO) =================
 const users = {}
 const userLastRequest = {}
 const ipRequests = {}
 
-// =============================
-// 🌐 UTIL: PEGAR IP
-// =============================
-function getClientIP(req) {
-  return (
-    req.headers["x-forwarded-for"] ||
-    req.socket.remoteAddress ||
-    "unknown"
-  )
+// ================= UTIL =================
+function getIP(req) {
+  return req.headers["x-forwarded-for"] || req.socket.remoteAddress
 }
 
-// =============================
-// 🚫 LIMITE POR IP
-// =============================
-function limitByIP(ip) {
+// ================= ANTI IP SPAM =================
+function limitIP(ip) {
   const now = Date.now()
 
   if (!ipRequests[ip]) {
@@ -59,35 +58,7 @@ function limitByIP(ip) {
   return true
 }
 
-// =============================
-// 🔐 VERIFICAR TOKEN GOOGLE
-// =============================
-async function verifyGoogleToken(token) {
-  try {
-    const res = await axios.get(
-      `https://oauth2.googleapis.com/tokeninfo?id_token=${token}`
-    )
-    return res.data
-  } catch (err) {
-    return null
-  }
-}
-
-// =============================
-// 💰 RESET DE CRÉDITOS
-// =============================
-function checkAndResetCredits(user) {
-  const now = Date.now()
-
-  if (!user.lastReset || now - user.lastReset > 86400000) {
-    user.credits = DAILY_CREDITS
-    user.lastReset = now
-  }
-}
-
-// =============================
-// ⏳ RATE LIMIT POR USUÁRIO
-// =============================
+// ================= RATE LIMIT USER =================
 function canRequest(userId) {
   const now = Date.now()
 
@@ -102,74 +73,68 @@ function canRequest(userId) {
   return true
 }
 
-// =============================
-// 🟢 HEALTH CHECK
-// =============================
+// ================= RESET CRÉDITOS =================
+function resetCredits(user) {
+  const now = Date.now()
+
+  if (!user.lastReset || now - user.lastReset > 86400000) {
+    user.credits = DAILY_CREDITS
+    user.lastReset = now
+  }
+}
+
+// ================= HEALTH CHECK =================
 app.get("/", (req, res) => {
   res.send("Backend rodando 🚀")
 })
 
-// =============================
-// 🚀 ENDPOINT PRINCIPAL
-// =============================
+// ================= MAIN API =================
 app.post("/generate", async (req, res) => {
   const { token, prompt } = req.body
+  const ip = getIP(req)
 
-  const ip = getClientIP(req)
-
-  // 🚫 limite IP
-  if (!limitByIP(ip)) {
-    return res.status(429).json({ error: "Muitas requisições" })
+  // 🚫 IP LIMIT
+  if (!limitIP(ip)) {
+    return res.status(429).send("Muitas requisições")
   }
 
-  // 🔐 token obrigatório
-  if (!token) {
-    return res.status(401).json({ error: "Token ausente" })
+  // 🔐 SUPABASE TOKEN
+  const data = verifySupabaseToken(token)
+  if (!data) return res.status(403).send("Token inválido")
+
+  const email = data.email || data.sub
+
+  if (!email) {
+    return res.status(403).send("Usuário inválido")
   }
 
-  const userData = await verifyGoogleToken(token)
-
-  if (!userData || !userData.email) {
-    return res.status(403).json({ error: "Token inválido" })
-  }
-
-  const userId = userData.email
-
-  // 👤 cria usuário se não existir
-  if (!users[userId]) {
-    users[userId] = {
+  // 👤 cria usuário em memória
+  if (!users[email]) {
+    users[email] = {
       credits: DAILY_CREDITS,
-      lastReset: Date.now(),
-      planExpiresAt: Date.now() + 30 * 86400000
+      lastReset: Date.now()
     }
   }
 
-  const user = users[userId]
+  const user = users[email]
 
-  // ⛔ plano expirado
-  if (Date.now() > user.planExpiresAt) {
-    return res.status(403).json({ error: "Plano expirado" })
-  }
+  resetCredits(user)
 
-  checkAndResetCredits(user)
-
-  // ⏳ cooldown
-  if (!canRequest(userId)) {
-    return res.status(429).json({ error: "Aguarde 3 segundos" })
+  // ⏳ rate limit
+  if (!canRequest(email)) {
+    return res.status(429).send("Aguarde 3 segundos")
   }
 
   // 💰 créditos
   if (user.credits < COST_PER_REQUEST) {
-    return res.status(403).json({ error: "Sem créditos" })
+    return res.status(403).send("Sem créditos")
   }
 
-  // ✍️ valida prompt
   if (!prompt || prompt.length > 2000) {
-    return res.status(400).json({ error: "Prompt inválido" })
+    return res.status(400).send("Prompt inválido")
   }
 
   try {
-    // 🤖 chamada IA (Grok API)
     const response = await axios.post(
       "https://api.x.ai/v1/chat/completions",
       {
@@ -196,16 +161,11 @@ app.post("/generate", async (req, res) => {
 
   } catch (err) {
     console.error(err)
-
-    res.status(500).json({
-      error: "Erro na geração"
-    })
+    res.status(500).send("Erro na geração")
   }
 })
 
-// =============================
-// 🌐 START SERVER
-// =============================
+// ================= START =================
 const PORT = process.env.PORT || 8080
 
 app.listen(PORT, () => {
