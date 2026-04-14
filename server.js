@@ -185,7 +185,7 @@ app.post("/generate", async (req, res) => {
     const response = await axios.post(
       "https://api.x.ai/v1/chat/completions",
       {
-        model: "grok-4-fast-non-reasoning",
+        model: "grok-3",
         max_tokens: MAX_TOKENS,
         messages: [{ role: "user", content: prompt.trim() }],
       },
