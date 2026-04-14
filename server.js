@@ -19,7 +19,6 @@ app.use(express.json({ limit: "20mb" }));
 // ================= CONFIG =================
 const DAILY_CREDITS = 2000;
 const COST_PER_REQUEST = 40;
-const MAX_TOKENS = 800;
 
 // ================= ENV =================
 const {
@@ -30,10 +29,7 @@ const {
 } = process.env;
 
 console.log("SUPABASE_URL:", SUPABASE_URL ? "OK" : "MISSING");
-console.log(
-  "SUPABASE_SERVICE_ROLE_KEY:",
-  SUPABASE_SERVICE_ROLE_KEY ? "OK" : "MISSING"
-);
+console.log("SUPABASE_SERVICE_ROLE_KEY:", SUPABASE_SERVICE_ROLE_KEY ? "OK" : "MISSING");
 console.log("API_KEY:", API_KEY ? "OK" : "MISSING");
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !API_KEY) {
@@ -42,16 +38,12 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !API_KEY) {
 }
 
 // ================= CLIENT ADMIN =================
-const supabaseAdmin = createClient(
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  }
-);
+const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+  auth: {
+    persistSession: false,
+    autoRefreshToken: false,
+  },
+});
 
 // ================= AUTH =================
 async function verifySupabaseToken(rawToken) {
@@ -182,32 +174,70 @@ app.post("/generate", async (req, res) => {
   }
 
   try {
-    const response = await axios.post(
-      "https://api.x.ai/v1/chat/completions",
-      {
-        model: "grok-3",
-        max_tokens: MAX_TOKENS,
-        messages: [{ role: "user", content: prompt.trim() }],
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${API_KEY}`,
-          "Content-Type": "application/json",
+    let result;
+
+    if (type === "video") {
+      const response = await axios.post(
+        "https://api.x.ai/v1/images/generations",
+        {
+          model: "grok-imagine-video",
+          prompt: prompt.trim(),
+          response_format: "url",
         },
-      }
-    );
+        {
+          headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      const url = response.data?.data?.[0]?.url;
+      result = { url, creditsLeft: user.credits - COST_PER_REQUEST, duration: duration || 6, type: "video" };
+
+    } else if (type === "image-pro") {
+      const response = await axios.post(
+        "https://api.x.ai/v1/images/generations",
+        {
+          model: "grok-imagine-image-pro",
+          prompt: prompt.trim(),
+          response_format: "url",
+          n: 1,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      const url = response.data?.data?.[0]?.url;
+      result = { url, creditsLeft: user.credits - COST_PER_REQUEST, type: "image" };
+
+    } else {
+      const response = await axios.post(
+        "https://api.x.ai/v1/images/generations",
+        {
+          model: "grok-imagine-image",
+          prompt: prompt.trim(),
+          response_format: "url",
+          n: 1,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${API_KEY}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+      const url = response.data?.data?.[0]?.url;
+      result = { url, creditsLeft: user.credits - COST_PER_REQUEST, type: "image" };
+    }
 
     user.credits -= COST_PER_REQUEST;
+    return res.json(result);
 
-    return res.json({
-      message: response.data?.choices?.[0]?.message?.content || "Processado com sucesso",
-      creditsLeft: user.credits,
-      duration: duration || 6,
-      type: type || "video",
-    });
   } catch (err) {
     console.error("Grok error:", err?.response?.data || err.message);
-
     return res.status(err?.response?.status || 500).json({
       error: "Erro na geração",
       details: err?.response?.data || err.message,
