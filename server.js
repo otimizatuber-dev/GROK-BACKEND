@@ -128,7 +128,7 @@ app.get("/", (req, res) => {
 
 // ================= MAIN =================
 app.post("/generate", async (req, res) => {
-  const { token, prompt, duration, type, image, format } = req.body;
+  const { token, prompt, duration, type, image, format, resolution } = req.body;
   const ip = getIP(req);
 
   if (!limitIP(ip)) return res.status(429).json({ error: "Muitas requisições" });
@@ -157,6 +157,7 @@ app.post("/generate", async (req, res) => {
           model: "grok-imagine-video",
           prompt: prompt.trim(),
           duration: duration || 6,
+          ...(resolution && { resolution }),
         },
         {
           headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
@@ -182,6 +183,7 @@ app.post("/generate", async (req, res) => {
           prompt: prompt.trim(),
           duration: duration || 6,
           image: { url: image },
+          ...(resolution && { resolution }),
         },
         {
           headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
@@ -196,8 +198,8 @@ app.post("/generate", async (req, res) => {
       return res.json({ url: videoUrl, creditsLeft: user.credits, type: "animate" });
     }
 
-    // ============ IMAGEM PRO ============
-    if (type === "image-pro") {
+    // ============ IMAGEM (grok-imagine-image-pro) ============
+    if (type === "image") {
       const response = await axios.post(
         "https://api.x.ai/v1/images/generations",
         {
@@ -215,28 +217,10 @@ app.post("/generate", async (req, res) => {
       if (!url) return res.status(500).json({ error: "Não foi possível gerar a imagem" });
 
       user.credits -= COST_PER_REQUEST;
-      return res.json({ url, creditsLeft: user.credits, type: "image-pro" });
+      return res.json({ url, creditsLeft: user.credits, type: "image" });
     }
 
-    // ============ IMAGEM PADRÃO ============
-    const response = await axios.post(
-      "https://api.x.ai/v1/images/generations",
-      {
-        model: "grok-imagine-image",
-        prompt: prompt.trim(),
-        response_format: "url",
-        n: 1,
-      },
-      {
-        headers: { Authorization: `Bearer ${API_KEY}`, "Content-Type": "application/json" },
-      }
-    );
-
-    const url = response.data?.data?.[0]?.url;
-    if (!url) return res.status(500).json({ error: "Não foi possível gerar a imagem" });
-
-    user.credits -= COST_PER_REQUEST;
-    return res.json({ url, creditsLeft: user.credits, type: "image" });
+    return res.status(400).json({ error: "Tipo inválido. Use: video, animate ou image" });
 
   } catch (err) {
     console.error("Grok error:", err?.response?.data || err.message);
