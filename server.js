@@ -2,27 +2,45 @@
 const express = require("express")
 const axios = require("axios")
 const cors = require("cors")
+const mongoose = require("mongoose")
 
 const app = express()
 
-app.use(express.json())
+// 🔥 CORS CORRIGIDO (SEU ERRO DO LOVEABLE)
 app.use(cors({
-  origin: "https://SEU-SITE.com"
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
 }))
 
+app.use(express.json())
+
+// ================= CONFIG =================
 const DAILY_CREDITS = 2000
 const COST_PER_REQUEST = 40
 const MAX_TOKENS = 800
 
-const users = {}
+// ================= DATABASE =================
+mongoose.connect(process.env.MONGO_URI)
+
+const userSchema = new mongoose.Schema({
+  email: String,
+  credits: Number,
+  lastReset: Number,
+  planExpiresAt: Number
+})
+
+const User = mongoose.model("User", userSchema)
+
+// ================= ANTI ABUSO =================
 const userLastRequest = {}
 const ipRequests = {}
 
-function getClientIP(req) {
+function getIP(req) {
   return req.headers["x-forwarded-for"] || req.socket.remoteAddress
 }
 
-function limitByIP(ip) {
+function limitIP(ip) {
   const now = Date.now()
 
   if (!ipRequests[ip]) {
@@ -41,23 +59,6 @@ function limitByIP(ip) {
   return true
 }
 
-async function verifyGoogleToken(token) {
-  try {
-    const res = await axios.get(`https://oauth2.googleapis.com/tokeninfo?id_token=${token}`)
-    return res.data
-  } catch {
-    return null
-  }
-}
-
-function checkAndResetCredits(user) {
-  const now = Date.now()
-  if (!user.lastReset || now - user.lastReset > 86400000) {
-    user.credits = DAILY_CREDITS
-    user.lastReset = now
-  }
-}
-
 function canRequest(userId) {
   const now = Date.now()
   if (!userLastRequest[userId]) {
@@ -69,53 +70,64 @@ function canRequest(userId) {
   return true
 }
 
+// ================= GOOGLE TOKEN =================
+async function verifyToken(token) {
+  try {
+    const res = await axios.get(
+      `https://oauth2.googleapis.com/tokeninfo?id_token=${token}`
+    )
+    return res.data
+  } catch {
+    return null
+  }
+}
+
+// ================= RESET =================
+function resetCredits(user) {
+  const now = Date.now()
+  if (!user.lastReset || now - user.lastReset > 86400000) {
+    user.credits = DAILY_CREDITS
+    user.lastReset = now
+  }
+}
+
+// ================= API =================
 app.post("/generate", async (req, res) => {
   const { token, prompt } = req.body
+  const ip = getIP(req)
 
-  const ip = getClientIP(req)
-
-  if (!limitByIP(ip)) {
+  if (!limitIP(ip)) {
     return res.status(429).send("Muitas requisições")
   }
 
-  if (!token) {
-    return res.status(401).send("Token ausente")
-  }
+  const data = await verifyToken(token)
+  if (!data) return res.status(403).send("Token inválido")
 
-  const userData = await verifyGoogleToken(token)
+  const email = data.email
 
-  if (!userData) {
-    return res.status(403).send("Token inválido")
-  }
+  let user = await User.findOne({ email })
 
-  const userId = userData.email
-
-  if (!users[userId]) {
-    users[userId] = {
+  if (!user) {
+    user = await User.create({
+      email,
       credits: DAILY_CREDITS,
       lastReset: Date.now(),
       planExpiresAt: Date.now() + 30 * 86400000
-    }
+    })
   }
-
-  const user = users[userId]
 
   if (Date.now() > user.planExpiresAt) {
     return res.status(403).send("Plano expirado")
   }
 
-  checkAndResetCredits(user)
+  resetCredits(user)
 
-  if (!canRequest(userId)) {
+  if (!canRequest(email)) {
     return res.status(429).send("Aguarde 3 segundos")
   }
 
   if (user.credits < COST_PER_REQUEST) {
-    return res.status(403).send("Sem créditos hoje")
-  }
-
-  if (!prompt || prompt.length > 2000) {
-    return res.status(400).send("Prompt inválido")
+    return res.status(403).send("Sem créditos")
   }
 
   try {
@@ -134,13 +146,14 @@ app.post("/generate", async (req, res) => {
     )
 
     user.credits -= COST_PER_REQUEST
+    await user.save()
 
     res.json({
       reply: response.data.choices[0].message.content,
       creditsLeft: user.credits
     })
 
-  } catch {
+  } catch (err) {
     res.status(500).send("Erro na geração")
   }
 })
