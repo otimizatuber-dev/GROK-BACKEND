@@ -1,3 +1,4 @@
+```js
 const express = require("express")
 const axios = require("axios")
 const cors = require("cors")
@@ -8,7 +9,7 @@ app.use(cors())
 
 const DAILY_CREDITS = 2000
 const COST_PER_REQUEST = 40
-const MAX_TOKENS = 1200
+const MAX_TOKENS = 800
 
 const users = {}
 const userLastRequest = {}
@@ -59,13 +60,19 @@ app.post("/generate", async (req, res) => {
     return res.status(403).send("Sem créditos hoje")
   }
 
+  if (!prompt || prompt.length > 2000) {
+    return res.status(400).send("Prompt inválido")
+  }
+
   try {
     const response = await axios.post(
       "https://api.x.ai/v1/chat/completions",
       {
         model: "grok-4-fast-non-reasoning",
         max_tokens: MAX_TOKENS,
-        messages: [{ role: "user", content: prompt }]
+        messages: [
+          { role: "user", content: prompt }
+        ]
       },
       {
         headers: {
@@ -82,9 +89,10 @@ app.post("/generate", async (req, res) => {
     })
 
   } catch (err) {
-    res.status(500).send("Erro")
+    res.status(500).send("Erro na geração")
   }
 })
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => console.log("rodando"))
+```
