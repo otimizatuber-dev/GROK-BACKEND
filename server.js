@@ -5,7 +5,7 @@ const { createClient } = require("@supabase/supabase-js")
 
 const app = express()
 
-// 🔥 CORS
+// ================= CORS =================
 app.use(cors({
   origin: "*",
   methods: ["GET", "POST", "OPTIONS"],
@@ -19,25 +19,32 @@ const DAILY_CREDITS = 2000
 const COST_PER_REQUEST = 40
 const MAX_TOKENS = 800
 
-// ================= SUPABASE CLIENT (RECOMENDADO) =================
+// ================= DEBUG =================
+console.log("SUPABASE_URL:", process.env.SUPABASE_URL)
+console.log("SUPABASE_ANON_KEY:", process.env.SUPABASE_ANON_KEY ? "OK" : "MISSING")
+console.log("API_KEY:", process.env.API_KEY ? "OK" : "MISSING")
+
+// ================= SUPABASE CLIENT =================
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  process.env.SUPABASE_ANON_KEY
 )
 
-// 🔐 valida token corretamente (NÃO usa JWT manual)
+// ================= AUTH =================
 async function verifySupabaseToken(token) {
+  if (!token) return null
+
   const { data, error } = await supabase.auth.getUser(token)
 
   if (error || !data?.user) {
-    console.log("Supabase auth error:", error?.message)
+    console.log("Auth error:", error?.message)
     return null
   }
 
   return data.user
 }
 
-// ================= MEMÓRIA (SEM BANCO) =================
+// ================= MEMÓRIA =================
 const users = {}
 const userLastRequest = {}
 const ipRequests = {}
@@ -47,7 +54,7 @@ function getIP(req) {
   return req.headers["x-forwarded-for"] || req.socket.remoteAddress
 }
 
-// ================= ANTI IP SPAM =================
+// ================= ANTI-SPAM IP =================
 function limitIP(ip) {
   const now = Date.now()
 
@@ -67,7 +74,7 @@ function limitIP(ip) {
   return true
 }
 
-// ================= RATE LIMIT =================
+// ================= RATE LIMIT USER =================
 function canRequest(userId) {
   const now = Date.now()
 
@@ -92,12 +99,12 @@ function resetCredits(user) {
   }
 }
 
-// ================= HEALTH CHECK =================
+// ================= HEALTH =================
 app.get("/", (req, res) => {
   res.send("Backend rodando 🚀")
 })
 
-// ================= MAIN ROUTE =================
+// ================= MAIN =================
 app.post("/generate", async (req, res) => {
   const { token, prompt } = req.body
   const ip = getIP(req)
@@ -107,33 +114,33 @@ app.post("/generate", async (req, res) => {
     return res.status(429).send("Muitas requisições")
   }
 
-  // 🔐 SUPABASE AUTH (CORRETO)
+  // 🔐 AUTH
   const userData = await verifySupabaseToken(token)
 
   if (!userData) {
     return res.status(403).send("Token inválido")
   }
 
-  const email = userData.email || userData.id
+  const userId = userData.email || userData.id
 
-  // 👤 cria usuário em memória
-  if (!users[email]) {
-    users[email] = {
+  // 👤 USER MEM
+  if (!users[userId]) {
+    users[userId] = {
       credits: DAILY_CREDITS,
       lastReset: Date.now()
     }
   }
 
-  const user = users[email]
+  const user = users[userId]
 
   resetCredits(user)
 
-  // ⏳ rate limit usuário
-  if (!canRequest(email)) {
+  // ⏳ RATE LIMIT USER
+  if (!canRequest(userId)) {
     return res.status(429).send("Aguarde 3 segundos")
   }
 
-  // 💰 créditos
+  // 💰 CRÉDITOS
   if (user.credits < COST_PER_REQUEST) {
     return res.status(403).send("Sem créditos")
   }
