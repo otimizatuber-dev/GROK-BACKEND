@@ -1,152 +1,163 @@
-const express = require("express")
-const axios = require("axios")
-const cors = require("cors")
-const { createClient } = require("@supabase/supabase-js")
+const express = require("express");
+const axios = require("axios");
+const cors = require("cors");
+const { createClient } = require("@supabase/supabase-js");
 
-const app = express()
+const app = express();
 
 // ================= CORS =================
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"]
-}))
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
 
-app.use(express.json())
+app.use(express.json());
 
 // ================= CONFIG =================
-const DAILY_CREDITS = 2000
-const COST_PER_REQUEST = 40
-const MAX_TOKENS = 800
+const DAILY_CREDITS = 2000;
+const COST_PER_REQUEST = 40;
+const MAX_TOKENS = 800;
 
 // ================= DEBUG =================
-console.log("SUPABASE_URL:", process.env.SUPABASE_URL)
-console.log("SUPABASE_ANON_KEY:", process.env.SUPABASE_ANON_KEY ? "OK" : "MISSING")
-console.log("API_KEY:", process.env.API_KEY ? "OK" : "MISSING")
+console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
+console.log(
+  "SUPABASE_ANON_KEY:",
+  process.env.SUPABASE_ANON_KEY ? "OK" : "MISSING"
+);
+console.log("API_KEY:", process.env.API_KEY ? "OK" : "MISSING");
+
+// ================= VALIDAR ENV VARS (ESSENCIAL) =================
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error("❌ ERRO: variáveis do Supabase não configuradas!");
+  process.exit(1);
+}
 
 // ================= SUPABASE CLIENT =================
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY
-)
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ================= AUTH =================
 async function verifySupabaseToken(token) {
-  if (!token) return null
+  if (!token) return null;
 
-  const { data, error } = await supabase.auth.getUser(token)
+  const { data, error } = await supabase.auth.getUser(token);
 
   if (error || !data?.user) {
-    console.log("Auth error:", error?.message)
-    return null
+    console.log("Auth error:", error?.message);
+    return null;
   }
 
-  return data.user
+  return data.user;
 }
 
 // ================= MEMÓRIA =================
-const users = {}
-const userLastRequest = {}
-const ipRequests = {}
+const users = {};
+const userLastRequest = {};
+const ipRequests = {};
 
 // ================= UTIL =================
 function getIP(req) {
-  return req.headers["x-forwarded-for"] || req.socket.remoteAddress
+  return req.headers["x-forwarded-for"] || req.socket.remoteAddress;
 }
 
 // ================= ANTI-SPAM IP =================
 function limitIP(ip) {
-  const now = Date.now()
+  const now = Date.now();
 
   if (!ipRequests[ip]) {
-    ipRequests[ip] = { count: 1, last: now }
-    return true
+    ipRequests[ip] = { count: 1, last: now };
+    return true;
   }
 
   if (now - ipRequests[ip].last > 60000) {
-    ipRequests[ip] = { count: 1, last: now }
-    return true
+    ipRequests[ip] = { count: 1, last: now };
+    return true;
   }
 
-  if (ipRequests[ip].count >= 30) return false
+  if (ipRequests[ip].count >= 30) return false;
 
-  ipRequests[ip].count++
-  return true
+  ipRequests[ip].count++;
+  return true;
 }
 
 // ================= RATE LIMIT USER =================
 function canRequest(userId) {
-  const now = Date.now()
+  const now = Date.now();
 
   if (!userLastRequest[userId]) {
-    userLastRequest[userId] = now
-    return true
+    userLastRequest[userId] = now;
+    return true;
   }
 
-  if (now - userLastRequest[userId] < 3000) return false
+  if (now - userLastRequest[userId] < 3000) return false;
 
-  userLastRequest[userId] = now
-  return true
+  userLastRequest[userId] = now;
+  return true;
 }
 
 // ================= RESET CRÉDITOS =================
 function resetCredits(user) {
-  const now = Date.now()
+  const now = Date.now();
 
   if (!user.lastReset || now - user.lastReset > 86400000) {
-    user.credits = DAILY_CREDITS
-    user.lastReset = now
+    user.credits = DAILY_CREDITS;
+    user.lastReset = now;
   }
 }
 
-// ================= HEALTH =================
+// ================= HEALTH CHECK =================
 app.get("/", (req, res) => {
-  res.send("Backend rodando 🚀")
-})
+  res.json({ status: "ok", message: "Backend rodando 🚀" });
+});
 
 // ================= MAIN =================
 app.post("/generate", async (req, res) => {
-  const { token, prompt } = req.body
-  const ip = getIP(req)
+  const { token, prompt } = req.body;
+  const ip = getIP(req);
 
-  // 🚫 IP LIMIT
+  // IP LIMIT
   if (!limitIP(ip)) {
-    return res.status(429).send("Muitas requisições")
+    return res.status(429).send("Muitas requisições");
   }
 
-  // 🔐 AUTH
-  const userData = await verifySupabaseToken(token)
+  // AUTH
+  const userData = await verifySupabaseToken(token);
 
   if (!userData) {
-    return res.status(403).send("Token inválido")
+    return res.status(403).send("Token inválido");
   }
 
-  const userId = userData.email || userData.id
+  const userId = userData.email || userData.id;
 
-  // 👤 USER MEM
+  // USER MEMORY
   if (!users[userId]) {
     users[userId] = {
       credits: DAILY_CREDITS,
-      lastReset: Date.now()
-    }
+      lastReset: Date.now(),
+    };
   }
 
-  const user = users[userId]
+  const user = users[userId];
 
-  resetCredits(user)
+  resetCredits(user);
 
-  // ⏳ RATE LIMIT USER
+  // RATE LIMIT USER
   if (!canRequest(userId)) {
-    return res.status(429).send("Aguarde 3 segundos")
+    return res.status(429).send("Aguarde 3 segundos");
   }
 
-  // 💰 CRÉDITOS
+  // CREDITS
   if (user.credits < COST_PER_REQUEST) {
-    return res.status(403).send("Sem créditos")
+    return res.status(403).send("Sem créditos");
   }
 
   if (!prompt || prompt.length > 2000) {
-    return res.status(400).send("Prompt inválido")
+    return res.status(400).send("Prompt inválido");
   }
 
   try {
@@ -155,34 +166,31 @@ app.post("/generate", async (req, res) => {
       {
         model: "grok-4-fast-non-reasoning",
         max_tokens: MAX_TOKENS,
-        messages: [
-          { role: "user", content: prompt }
-        ]
+        messages: [{ role: "user", content: prompt }],
       },
       {
         headers: {
           Authorization: `Bearer ${process.env.API_KEY}`,
-          "Content-Type": "application/json"
-        }
+          "Content-Type": "application/json",
+        },
       }
-    )
+    );
 
-    user.credits -= COST_PER_REQUEST
+    user.credits -= COST_PER_REQUEST;
 
     res.json({
       reply: response.data.choices[0].message.content,
-      creditsLeft: user.credits
-    })
-
+      creditsLeft: user.credits,
+    });
   } catch (err) {
-    console.error("Grok error:", err?.response?.data || err.message)
-    res.status(500).send("Erro na geração")
+    console.error("Grok error:", err?.response?.data || err.message);
+    res.status(500).send("Erro na geração");
   }
-})
+});
 
 // ================= START =================
-const PORT = process.env.PORT || 8080
+const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
-  console.log("🚀 rodando na porta " + PORT)
-})
+  console.log("🚀 rodando na porta " + PORT);
+});
