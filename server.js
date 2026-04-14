@@ -29,23 +29,31 @@ console.log(
 );
 console.log("API_KEY:", process.env.API_KEY ? "OK" : "MISSING");
 
-// ================= VALIDAR ENV VARS (ESSENCIAL) =================
+// ================= VALIDAR ENV VARS =================
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_ANON_KEY;
+
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 if (!supabaseUrl || !supabaseKey) {
   console.error("❌ ERRO: variáveis do Supabase não configuradas!");
   process.exit(1);
 }
 
-// ================= SUPABASE CLIENT =================
+// ================= CLIENT PUBLIC =================
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// ================= AUTH =================
+// ================= CLIENT ADMIN (NOVO - CORREÇÃO JWT) =================
+const supabaseAdmin = createClient(
+  supabaseUrl,
+  supabaseServiceKey || supabaseKey
+);
+
+// ================= AUTH (CORRIGIDO) =================
 async function verifySupabaseToken(token) {
   if (!token) return null;
 
-  const { data, error } = await supabase.auth.getUser(token);
+  const { data, error } = await supabaseAdmin.auth.getUser(token);
 
   if (error || !data?.user) {
     console.log("Auth error:", error?.message);
@@ -120,12 +128,10 @@ app.post("/generate", async (req, res) => {
   const { token, prompt } = req.body;
   const ip = getIP(req);
 
-  // IP LIMIT
   if (!limitIP(ip)) {
     return res.status(429).send("Muitas requisições");
   }
 
-  // AUTH
   const userData = await verifySupabaseToken(token);
 
   if (!userData) {
@@ -134,7 +140,6 @@ app.post("/generate", async (req, res) => {
 
   const userId = userData.email || userData.id;
 
-  // USER MEMORY
   if (!users[userId]) {
     users[userId] = {
       credits: DAILY_CREDITS,
@@ -146,12 +151,10 @@ app.post("/generate", async (req, res) => {
 
   resetCredits(user);
 
-  // RATE LIMIT USER
   if (!canRequest(userId)) {
     return res.status(429).send("Aguarde 3 segundos");
   }
 
-  // CREDITS
   if (user.credits < COST_PER_REQUEST) {
     return res.status(403).send("Sem créditos");
   }
