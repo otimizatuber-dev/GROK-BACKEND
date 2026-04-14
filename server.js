@@ -6,61 +6,69 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 
 // ================= CORS =================
-app.use(
-  cors({
-    origin: "*",
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const corsOptions = {
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "apikey", "x-client-info"],
+};
 
-app.use(express.json());
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
+app.use(express.json({ limit: "20mb" }));
 
 // ================= CONFIG =================
 const DAILY_CREDITS = 2000;
 const COST_PER_REQUEST = 40;
 const MAX_TOKENS = 800;
 
-// ================= DEBUG =================
-console.log("SUPABASE_URL:", process.env.SUPABASE_URL);
+// ================= ENV =================
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  API_KEY,
+  PORT = 8080,
+} = process.env;
+
+console.log("SUPABASE_URL:", SUPABASE_URL ? "OK" : "MISSING");
 console.log(
-  "SUPABASE_ANON_KEY:",
-  process.env.SUPABASE_ANON_KEY ? "OK" : "MISSING"
+  "SUPABASE_SERVICE_ROLE_KEY:",
+  SUPABASE_SERVICE_ROLE_KEY ? "OK" : "MISSING"
 );
-console.log("API_KEY:", process.env.API_KEY ? "OK" : "MISSING");
+console.log("API_KEY:", API_KEY ? "OK" : "MISSING");
 
-// ================= VALIDAR ENV VARS =================
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
-
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
-  console.error("❌ ERRO: variáveis do Supabase não configuradas!");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !API_KEY) {
+  console.error("❌ ERRO: variáveis obrigatórias não configuradas.");
   process.exit(1);
 }
 
-// ================= CLIENT PUBLIC =================
-const supabase = createClient(supabaseUrl, supabaseKey);
-
-// ================= CLIENT ADMIN (NOVO - CORREÇÃO JWT) =================
+// ================= CLIENT ADMIN =================
 const supabaseAdmin = createClient(
-  supabaseUrl,
-  supabaseServiceKey || supabaseKey
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+    },
+  }
 );
 
-// ================= AUTH (CORRIGIDO) =================
-async function verifySupabaseToken(token) {
-  if (!token) return null;
+// ================= AUTH =================
+async function verifySupabaseToken(rawToken) {
+  const token = rawToken?.replace(/^Bearer\s+/i, "").trim();
+
+  if (!token) {
+    return { user: null, error: "missing_token" };
+  }
 
   const { data, error } = await supabaseAdmin.auth.getUser(token);
 
   if (error || !data?.user) {
-    console.log("Auth error:", error?.message);
-    return null;
+    console.error("Supabase auth error:", error?.message || "user_not_found");
+    return { user: null, error: error?.message || "invalid_token" };
   }
 
-  return data.user;
+  return { user: data.user, error: null };
 }
 
 // ================= MEMÓRIA =================
@@ -70,7 +78,13 @@ const ipRequests = {};
 
 // ================= UTIL =================
 function getIP(req) {
-  return req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+  const forwarded = req.headers["x-forwarded-for"];
+
+  if (typeof forwarded === "string" && forwarded.length > 0) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  return req.socket.remoteAddress || "unknown";
 }
 
 // ================= ANTI-SPAM IP =================
@@ -125,17 +139,21 @@ app.get("/", (req, res) => {
 
 // ================= MAIN =================
 app.post("/generate", async (req, res) => {
-  const { token, prompt } = req.body;
+  const { token, prompt, duration, type } = req.body;
   const ip = getIP(req);
 
   if (!limitIP(ip)) {
-    return res.status(429).send("Muitas requisições");
+    return res.status(429).json({ error: "Muitas requisições" });
   }
 
-  const userData = await verifySupabaseToken(token);
+  const authToken = token || req.headers.authorization;
+  const { user: userData, error: authError } = await verifySupabaseToken(authToken);
 
   if (!userData) {
-    return res.status(403).send("Token inválido");
+    return res.status(403).json({
+      error: "Token inválido",
+      details: authError,
+    });
   }
 
   const userId = userData.email || userData.id;
@@ -152,15 +170,15 @@ app.post("/generate", async (req, res) => {
   resetCredits(user);
 
   if (!canRequest(userId)) {
-    return res.status(429).send("Aguarde 3 segundos");
+    return res.status(429).json({ error: "Aguarde 3 segundos" });
   }
 
   if (user.credits < COST_PER_REQUEST) {
-    return res.status(403).send("Sem créditos");
+    return res.status(403).json({ error: "Sem créditos" });
   }
 
-  if (!prompt || prompt.length > 2000) {
-    return res.status(400).send("Prompt inválido");
+  if (!prompt || typeof prompt !== "string" || !prompt.trim() || prompt.length > 2000) {
+    return res.status(400).json({ error: "Prompt inválido" });
   }
 
   try {
@@ -169,11 +187,11 @@ app.post("/generate", async (req, res) => {
       {
         model: "grok-4-fast-non-reasoning",
         max_tokens: MAX_TOKENS,
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: "user", content: prompt.trim() }],
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.API_KEY}`,
+          Authorization: `Bearer ${API_KEY}`,
           "Content-Type": "application/json",
         },
       }
@@ -181,19 +199,23 @@ app.post("/generate", async (req, res) => {
 
     user.credits -= COST_PER_REQUEST;
 
-    res.json({
-      reply: response.data.choices[0].message.content,
+    return res.json({
+      message: response.data?.choices?.[0]?.message?.content || "Processado com sucesso",
       creditsLeft: user.credits,
+      duration: duration || 6,
+      type: type || "video",
     });
   } catch (err) {
     console.error("Grok error:", err?.response?.data || err.message);
-    res.status(500).send("Erro na geração");
+
+    return res.status(err?.response?.status || 500).json({
+      error: "Erro na geração",
+      details: err?.response?.data || err.message,
+    });
   }
 });
 
 // ================= START =================
-const PORT = process.env.PORT || 8080;
-
 app.listen(PORT, () => {
   console.log("🚀 rodando na porta " + PORT);
 });
